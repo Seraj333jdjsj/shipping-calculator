@@ -1,16 +1,11 @@
-name: Build Windows App
+name: Build Shipping Calculator EXE
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -19,14 +14,187 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Dependencies
-        run: npm install
+      - name: Scaffold and Build App
+        shell: pwsh
+        run: |
+          # 1. إنشاء مشروع Tauri React كامل بجميع أيقوناته وإعداداته
+          npm create tauri-app@latest app -- --template react-ts -y
+          cd app
+          npm install
 
-      - name: Build Tauri EXE
-        run: npm run tauri build
+          # 2. حقن واجهة وتصميم حاسبة الشحن الكاملة بدقة
+          @'
+          import React, { useState } from 'react';
 
-      - name: Export Executable
+          interface Package {
+            id: number;
+            qty: number;
+            length: number;
+            width: number;
+            height: number;
+            actualWeight: number;
+          }
+
+          interface AdditionalCharge {
+            id: number;
+            name: string;
+            amount: number;
+          }
+
+          export default function App() {
+            const [dimFactor, setDimFactor] = useState<number>(5000);
+            const [freightRate, setFreightRate] = useState<number>(8);
+            const [packages, setPackages] = useState<Package[]>([
+              { id: 1, qty: 2, length: 50, width: 40, height: 30, actualWeight: 20 }
+            ]);
+            const [charges, setCharges] = useState<AdditionalCharge[]>([
+              { id: 1, name: 'تخليص جمركي ومصاريف إضافية', amount: 300 }
+            ]);
+
+            const addPackage = () => {
+              setPackages([...packages, { id: Date.now(), qty: 1, length: 10, width: 10, height: 10, actualWeight: 1 }]);
+            };
+
+            const removePackage = (id: number) => {
+              if (packages.length > 1) setPackages(packages.filter(p => p.id !== id));
+            };
+
+            const updatePackage = (id: number, field: keyof Package, value: number) => {
+              setPackages(packages.map(p => p.id === id ? { ...p, [field]: value } : p));
+            };
+
+            const addCharge = () => {
+              setCharges([...charges, { id: Date.now(), name: 'رسوم إضافية', amount: 0 }]);
+            };
+
+            const removeCharge = (id: number) => {
+              setCharges(charges.filter(c => c.id !== id));
+            };
+
+            const updateCharge = (id: number, field: 'name' | 'amount', value: any) => {
+              setCharges(charges.map(c => c.id === id ? { ...c, [field]: value } : c));
+            };
+
+            const totalActualWeight = packages.reduce((sum, p) => sum + (p.actualWeight * p.qty), 0);
+            const totalVolumetricWeight = packages.reduce((sum, p) => {
+              const vol = (p.length * p.width * p.height * p.qty) / (dimFactor || 5000);
+              return sum + vol;
+            }, 0);
+
+            const chargeableWeight = Math.max(totalActualWeight, totalVolumetricWeight);
+            const freightCost = chargeableWeight * freightRate;
+            const additionalCost = charges.reduce((sum, c) => sum + Number(c.amount || 0), 0);
+            const totalCost = freightCost + additionalCost;
+            const effectivePerKg = chargeableWeight > 0 ? (totalCost / chargeableWeight) : 0;
+
+            return (
+              <div style={{ fontFamily: 'Segoe UI, Tahoma, sans-serif', padding: '24px', background: '#0f172a', minHeight: '100vh', color: '#f8fafc', direction: 'rtl' }}>
+                <header style={{ marginBottom: '24px', borderBottom: '1px solid #334155', paddingBottom: '16px' }}>
+                  <h1 style={{ margin: 0, fontSize: '22px', color: '#38bdf8' }}>حاسبة تكاليف الشحن الدولي (Shipping Calculator)</h1>
+                  <p style={{ margin: '6px 0 0', color: '#94a3b8', fontSize: '13px' }}>حساب فوري للوزن الفعلي، الحجمي، والوزن الخاضع للرسوم وتكلفة الكيلو الإجمالية</p>
+                </header>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '16px', marginBottom: '24px' }}>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                    <label style={{ display: 'block', fontSize: '13px', color: '#94a3b8', marginBottom: '8px' }}>معامل الحجم (DIM Factor)</label>
+                    <input type="number" value={dimFactor} onChange={e => setDimFactor(Number(e.target.value))} style={{ width: '100%', padding: '8px', borderRadius: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', boxSizing: 'border-box' }} />
+                  </div>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                    <label style={{ display: 'block', fontSize: '13px', color: '#94a3b8', marginBottom: '8px' }}>سعر الشحن للكيلو (USD / kg)</label>
+                    <input type="number" value={freightRate} onChange={e => setFreightRate(Number(e.target.value))} style={{ width: '100%', padding: '8px', borderRadius: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', boxSizing: 'border-box' }} />
+                  </div>
+                </div>
+
+                {/* جدول الطرود */}
+                <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155', marginBottom: '24px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <h3 style={{ margin: 0, fontSize: '16px', color: '#e2e8f0' }}>بيانات الطرود (Packages)</h3>
+                    <button onClick={addPackage} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>+ إضافة طرد</button>
+                  </div>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center', fontSize: '14px' }}>
+                      <thead>
+                        <tr style={{ background: '#334155', color: '#cbd5e1' }}>
+                          <th style={{ padding: '8px' }}>العدد</th>
+                          <th style={{ padding: '8px' }}>الطول (cm)</th>
+                          <th style={{ padding: '8px' }}>العرض (cm)</th>
+                          <th style={{ padding: '8px' }}>الارتفاع (cm)</th>
+                          <th style={{ padding: '8px' }}>الوزن للقطعة (kg)</th>
+                          <th style={{ padding: '8px' }}>الحجمي الإجمالي</th>
+                          <th style={{ padding: '8px' }}>إجراء</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {packages.map(p => {
+                          const pVol = (p.length * p.width * p.height * p.qty) / (dimFactor || 5000);
+                          return (
+                            <tr key={p.id} style={{ borderBottom: '1px solid #334155' }}>
+                              <td style={{ padding: '8px' }}><input type="number" value={p.qty} onChange={e => updatePackage(p.id, 'qty', Number(e.target.value))} style={{ width: '60px', padding: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', textAlign: 'center', borderRadius: '4px' }} /></td>
+                              <td style={{ padding: '8px' }}><input type="number" value={p.length} onChange={e => updatePackage(p.id, 'length', Number(e.target.value))} style={{ width: '70px', padding: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', textAlign: 'center', borderRadius: '4px' }} /></td>
+                              <td style={{ padding: '8px' }}><input type="number" value={p.width} onChange={e => updatePackage(p.id, 'width', Number(e.target.value))} style={{ width: '70px', padding: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', textAlign: 'center', borderRadius: '4px' }} /></td>
+                              <td style={{ padding: '8px' }}><input type="number" value={p.height} onChange={e => updatePackage(p.id, 'height', Number(e.target.value))} style={{ width: '70px', padding: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', textAlign: 'center', borderRadius: '4px' }} /></td>
+                              <td style={{ padding: '8px' }}><input type="number" value={p.actualWeight} onChange={e => updatePackage(p.id, 'actualWeight', Number(e.target.value))} style={{ width: '70px', padding: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff', textAlign: 'center', borderRadius: '4px' }} /></td>
+                              <td style={{ padding: '8px', color: '#38bdf8', fontWeight: 'bold' }}>{pVol.toFixed(2)} kg</td>
+                              <td style={{ padding: '8px' }}><button onClick={() => removePackage(p.id)} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '4px', cursor: 'pointer' }}>حذف</button></td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* الرسوم الإضافية */}
+                <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155', marginBottom: '24px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+                    <h3 style={{ margin: 0, fontSize: '16px', color: '#e2e8f0' }}>الرسوم والمصاريف الإضافية (Additional Charges)</h3>
+                    <button onClick={addCharge} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold' }}>+ إضافة رسم</button>
+                  </div>
+                  {charges.map(c => (
+                    <div key={c.id} style={{ display: 'flex', gap: '12px', marginBottom: '10px' }}>
+                      <input type="text" value={c.name} onChange={e => updateCharge(c.id, 'name', e.target.value)} placeholder="اسم الرسم" style={{ flex: 1, padding: '8px', borderRadius: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff' }} />
+                      <input type="number" value={c.amount} onChange={e => updateCharge(c.id, 'amount', Number(e.target.value))} placeholder="المبلغ (USD)" style={{ width: '150px', padding: '8px', borderRadius: '6px', background: '#0f172a', border: '1px solid #475569', color: '#fff' }} />
+                      <button onClick={() => removeCharge(c.id)} style={{ background: '#ef4444', color: '#fff', border: 'none', padding: '8px 14px', borderRadius: '6px', cursor: 'pointer' }}>حذف</button>
+                    </div>
+                  ))}
+                </div>
+
+                {/* بطاقات النتائج الإجمالية */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '16px' }}>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                    <div style={{ fontSize: '13px', color: '#94a3b8' }}>إجمالي الوزن الفعلي</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#f1f5f9', marginTop: '6px' }}>{totalActualWeight.toFixed(2)} kg</div>
+                  </div>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                    <div style={{ fontSize: '13px', color: '#94a3b8' }}>إجمالي الوزن الحجمي</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#f1f5f9', marginTop: '6px' }}>{totalVolumetricWeight.toFixed(2)} kg</div>
+                  </div>
+                  <div style={{ background: '#0284c7', padding: '16px', borderRadius: '8px', border: '1px solid #38bdf8' }}>
+                    <div style={{ fontSize: '13px', color: '#e0f2fe' }}>الوزن المعتمد (Chargeable)</div>
+                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#fff', marginTop: '6px' }}>{chargeableWeight.toFixed(2)} kg</div>
+                  </div>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '1px solid #334155' }}>
+                    <div style={{ fontSize: '13px', color: '#94a3b8' }}>تكلفة الشحن فقط</div>
+                    <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#f1f5f9', marginTop: '6px' }}>{freightCost.toFixed(2)} USD</div>
+                  </div>
+                  <div style={{ background: '#1e293b', padding: '16px', borderRadius: '8px', border: '2px solid #22c55e' }}>
+                    <div style={{ fontSize: '13px', color: '#86efac' }}>المبلغ الإجمالي النهائي (TOTAL)</div>
+                    <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#4ade80', marginTop: '6px' }}>{totalCost.toFixed(2)} USD</div>
+                    <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>التكلفة الفعلية للكيلو: {effectivePerKg.toFixed(2)} USD/kg</div>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          '@ | Set-Content src/App.tsx -Encoding UTF8
+
+          # 3. بناء تطبيق الويندوز مباشرة
+          npm run tauri build
+
+      - name: Upload Installer EXE
         uses: actions/upload-artifact@v4
         with:
-          name: ShippingCalculator-Setup
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          name: ShippingCalculator-Setup-EXE
+          path: |
+            app/src-tauri/target/release/bundle/nsis/*.exe
+            app/src-tauri/target/release/*.exe
