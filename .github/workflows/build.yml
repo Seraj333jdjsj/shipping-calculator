@@ -14,76 +14,24 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Scaffold and Build V2 Final System
+      - name: Scaffold and Build App
         shell: pwsh
         run: |
           npm create tauri-app@latest app -- --template react-ts -y
           cd app
           npm install
-          npm install jspdf @tauri-apps/api @tauri-apps/plugin-sql @tauri-apps/plugin-dialog @tauri-apps/plugin-fs
+          npm install jspdf
 
-          # 1. تحديث Cargo.toml لإضافة ملحقات Rust الصحيحة
-          $cargoPath = "src-tauri/Cargo.toml"
-          $cargoContent = Get-Content $cargoPath -Raw
-          $plugins = @"
-          tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-          tauri-plugin-dialog = "2"
-          tauri-plugin-fs = "2"
-          "@
-          $cargoContent = $cargoContent -replace '\[dependencies\]', "[dependencies]`n$plugins"
-          Set-Content $cargoPath$cargoContent -Encoding UTF8
-
-          # 2. تحديث tauri.conf.json
+          # ضبط اسم وهوية التطبيق والنافذة
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw \vert{} ConvertFrom-Json$conf.productName = "Marafy.seraj.systim"
           $conf.identifier = "com.marafy.seraj.systim"
           if ($conf.app.windows) {$conf.app.windows[0].title = "Marafy.seraj.systim - لوحة التحكم"
           }
-          $conf.plugins = @{
-            sql = @{ preload = @("sqlite:shipping.db") }
-          }
-          $conf \vert{} ConvertTo-Json -Depth 20 \vert{} Set-Content$confPath -Encoding UTF8
+          $conf \vert{} ConvertTo-Json -Depth 10 \vert{} Set-Content$confPath -Encoding UTF8
 
-          # 3. إنشاء مجلد وملف التصاريح Capabilities الخاص بـ Tauri v2
-          New-Item -ItemType Directory -Force -Path "src-tauri/capabilities"
           @'
-          {
-            "$schema": "../gen/schemas/desktop-schema.json",
-            "identifier": "default",
-            "description": "Capability for full system features",
-            "windows": ["main"],
-            "permissions": [
-              "core:default",
-              "sql:default",
-              "sql:allow-execute",
-              "sql:allow-select",
-              "dialog:default",
-              "dialog:allow-save",
-              "fs:default",
-              "fs:allow-write-file"
-            ]
-          }
-          '@ | Set-Content src-tauri/capabilities/default.json -Encoding UTF8
-
-          # 4. حقن كود Rust في lib.rs
-          @'
-          #[cfg_attr(mobile, tauri::mobile_entry_point)]
-          pub fn run() {
-              tauri::Builder::default()
-                  .plugin(tauri_plugin_sql::Builder::default().build())
-                  .plugin(tauri_plugin_dialog::init())
-                  .plugin(tauri_plugin_fs::init())
-                  .run(tauri::generate_context!())
-                  .expect("error while running tauri application");
-          }
-          '@ | Set-Content src-tauri/src/lib.rs -Encoding UTF8
-
-          # 5. حقن واجهة المستخدم والحسابات والـ PDF
-          @'
-          import { useState, useEffect } from 'react';
-          import Database from '@tauri-apps/plugin-sql';
-          import { save } from '@tauri-apps/plugin-dialog';
-          import { writeFile } from '@tauri-apps/plugin-fs';
+          import { useState, useEffect, ChangeEvent } from 'react';
           import jsPDF from 'jspdf';
 
           interface Package {
@@ -101,44 +49,104 @@ jobs:
             amount: number;
           }
 
+          interface SavedQuotation {
+            refNumber: string;
+            date: string;
+            customerName: string;
+            companyName: string;
+            phone: string;
+            mode: 'AIR' | 'SEA';
+            totalCost: number;
+            currency: string;
+          }
+
           export default function App() {
             const [mode, setMode] = useState<'AIR' | 'SEA'>('AIR');
             const [refNumber, setRefNumber] = useState('MRF-' + Math.floor(1000 + Math.random() * 9000));
             const [customerName, setCustomerName] = useState('');
             const [companyName, setCompanyName] = useState('');
             const [phone, setPhone] = useState('');
-            const [email, setEmail] = useState('');
             const [origin, setOrigin] = useState('طرابلس');
             const [destination, setDestination] = useState('');
             const [currency, setCurrency] = useState<'USD' | 'LYD' | 'EUR'>('USD');
 
-            // جوي
+            // إعدادات الشحن الجوي
             const [dimFactor, setDimFactor] = useState<number>(5000);
             const [freightRateAir, setFreightRateAir] = useState<number>(8);
-            const [packages, setPackages] = useState<Package[]>([
+            const [airPackages, setAirPackages] = useState<Package[]>([
               { id: 1, qty: 2, length: 50, width: 40, height: 30, actualWeight: 20 }
             ]);
 
-            // بحري W/M
+            // إعدادات الشحن البحري LCL W/M
             const [seaCbm, setSeaCbm] = useState<number>(3.5);
             const [seaWeightKg, setSeaWeightKg] = useState<number>(1200);
             const [seaRateWm, setSeaRateWm] = useState<number>(45);
             const [seaMinCbm, setSeaMinCbm] = useState<number>(1.0);
 
-            // رسوم إضافية
+            // المصاريف الإضافية
             const [charges, setCharges] = useState<AdditionalCharge[]>([
               { id: 1, name: 'تخليص ومصاريف موانئ / مطار', amount: 150 }
             ]);
 
             const [logo, setLogo] = useState<string | null>(null);
-            const [db, setDb] = useState<any>(null);
-            const [savedId, setSavedId] = useState<number | null>(null);
+            const [savedHistory, setSavedHistory] = useState<SavedQuotation[]>([]);
             const [msg, setMsg] = useState('');
 
+            useEffect(() => {
+              const savedLogo = localStorage.getItem('marafy_custom_logo');
+              if (savedLogo) setLogo(savedLogo);
+
+              const historyData = localStorage.getItem('marafy_saved_quotes');
+              if (historyData) {
+                try { setSavedHistory(JSON.parse(historyData)); } catch {}
+              }
+            }, []);
+
+            const handleLogoUpload = (e: ChangeEvent<HTMLInputElement>) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                const reader = new FileReader();
+                reader.onloadend = () => {
+                  const base64String = reader.result as string;
+                  setLogo(base64String);
+                  localStorage.setItem('marafy_custom_logo', base64String);
+                  setMsg('تم حفظ الشعار في ذاكرة النظام الدائمة بنجاح ✓');
+                };
+                reader.readAsDataURL(file);
+              }
+            };
+
+            const removeLogo = () => {
+              setLogo(null);
+              localStorage.removeItem('marafy_custom_logo');
+            };
+
+            // وظائف الجوي
+            const addAirPackage = () => {
+              setAirPackages([...airPackages, { id: Date.now(), qty: 1, length: 10, width: 10, height: 10, actualWeight: 1 }]);
+            };
+            const removeAirPackage = (id: number) => {
+              if (airPackages.length > 1) setAirPackages(airPackages.filter(p => p.id !== id));
+            };
+            const updateAirPackage = (id: number, field: keyof Package, value: number) => {
+              setAirPackages(airPackages.map(p => p.id === id ? { ...p, [field]: value } : p));
+            };
+
+            // وظائف الرسوم
+            const addCharge = () => {
+              setCharges([...charges, { id: Date.now(), name: 'بند إضافي', amount: 0 }]);
+            };
+            const removeCharge = (id: number) => {
+              setCharges(charges.filter(c => c.id !== id));
+            };
+            const updateCharge = (id: number, field: 'name' | 'amount', value: any) => {
+              setCharges(charges.map(c => c.id === id ? { ...c, [field]: value } : c));
+            };
+
             // الحسابات
-            const totalActualWeight = packages.reduce((s, p) => s + (p.actualWeight * p.qty), 0);
-            const totalVolumetricWeight = packages.reduce((s, p) => s + ((p.length * p.width * p.height * p.qty) / (dimFactor || 5000)), 0);
-            const airChargeable = Math.max(totalActualWeight, totalVolumetricWeight);
+            const totalAirActual = airPackages.reduce((s, p) => s + (p.actualWeight * p.qty), 0);
+            const totalAirVolumetric = airPackages.reduce((s, p) => s + ((p.length * p.width * p.height * p.qty) / (dimFactor || 5000)), 0);
+            const airChargeable = Math.max(totalAirActual, totalAirVolumetric);
             const airFreightCost = airChargeable * freightRateAir;
 
             const seaWeightTons = (seaWeightKg || 0) / 1000;
@@ -147,78 +155,34 @@ jobs:
             const seaFreightCost = seaChargeableRT * seaRateWm;
 
             const currentFreightCost = mode === 'AIR' ? airFreightCost : seaFreightCost;
-            const additionalCost = charges.reduce((s, c) => s + Number(c.amount || 0), 0);
-            const totalCost = currentFreightCost + additionalCost;
-            const effectivePerKg = mode === 'AIR' && airChargeable > 0 ? (totalCost / airChargeable) : 0;
+            const totalAdditionalCharges = charges.reduce((s, c) => s + Number(c.amount || 0), 0);
+            const finalTotal = currentFreightCost + totalAdditionalCharges;
 
-            useEffect(() => {
-              (async () => {
-                try {
-                  const database = await Database.load('sqlite:shipping.db');
-                  setDb(database);
-                  await database.execute(`CREATE TABLE IF NOT EXISTS quotations (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ref_no TEXT UNIQUE,
-                    customer TEXT,
-                    company TEXT,
-                    phone TEXT,
-                    email TEXT,
-                    mode TEXT,
-                    origin TEXT,
-                    dest TEXT,
-                    currency TEXT,
-                    freight_cost REAL,
-                    additional_cost REAL,
-                    total_cost REAL,
-                    date TEXT
-                  )`);
-                  await database.execute(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, val TEXT)`);
-                  const res: any = await database.select(`SELECT val FROM settings WHERE key='logo'`);
-                  if (res[0]?.val) setLogo(res[0].val);
-                } catch (e: any) {
-                  console.error(e);
-                }
-              })();
-            }, []);
-
-            const handleLogo = async (e: any) => {
-              const file = e.target.files[0];
-              if (!file) return;
-              const reader = new FileReader();
-              reader.onload = async () => {
-                const b64 = reader.result as string;
-                setLogo(b64);
-                if (db) await db.execute(`INSERT OR REPLACE INTO settings (key, val) VALUES ('logo', $1)`, [b64]);
-                setMsg('تم حفظ الشعار في قاعدة البيانات بنجاح ✓');
+            const handleSaveQuotation = () => {
+              if (!customerName.trim()) { setMsg('يرجى إدخال اسم العميل لحفظ التسعيرة'); return; }
+              const newRecord: SavedQuotation = {
+                refNumber,
+                date: new Date().toLocaleDateString('ar-LY'),
+                customerName,
+                companyName,
+                phone,
+                mode,
+                totalCost: finalTotal,
+                currency
               };
-              reader.readAsDataURL(file);
+              const updated = [newRecord, ...savedHistory.filter(q => q.refNumber !== refNumber)];
+              setSavedHistory(updated);
+              localStorage.setItem('marafy_saved_quotes', JSON.stringify(updated));
+              setMsg(`تم حفظ تسعيرة الشحنة (${refNumber}) بنجاح ✓`);
             };
 
-            const handleSave = async () => {
-              if (!customerName.trim()) { setMsg('اسم العميل مطلوب'); return; }
-              try {
-                const date = new Date().toISOString().split('T')[0];
-                if (db) {
-                  await db.execute(
-                    `INSERT INTO quotations (ref_no, customer, company, phone, email, mode, origin, dest, currency, freight_cost, additional_cost, total_cost, date)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
-                    [refNumber, customerName, companyName, phone, email, mode, origin, destination, currency, currentFreightCost, additionalCost, totalCost, date]
-                  );
-                }
-                setSavedId(Date.now());
-                setMsg('تم حفظ العملية في قاعدة البيانات بنجاح ✓ يمكنك الآن تصدير كشف الحساب');
-              } catch (e: any) {
-                setMsg('خطأ أثناء الحفظ: ' + e.message);
-              }
-            };
-
-            const exportPDF = async () => {
+            const exportPDF = () => {
               try {
                 const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a5' });
                 let y = 14;
 
                 if (logo) {
-                  try { doc.addImage(logo, 'JPEG', 10, y, 40, 16); } catch {}
+                  try { doc.addImage(logo, 'JPEG', 10, y, 38, 14); } catch {}
                 }
 
                 doc.setFontSize(14);
@@ -226,7 +190,7 @@ jobs:
                 doc.text('Marafy.seraj.systim', 138, y + 6, { align: 'right' });
                 doc.setFontSize(8);
                 doc.setTextColor(100);
-                doc.text('Official Quotation / تسعير رسمي', 138, y + 12, { align: 'right' });
+                doc.text('Official Quotation / تسعيرة رسمية', 138, y + 12, { align: 'right' });
 
                 y += 24;
                 doc.setDrawColor(200);
@@ -235,7 +199,7 @@ jobs:
 
                 doc.setFontSize(8);
                 doc.setTextColor(40);
-                doc.text(`Ref: ${refNumber} | Date: ${new Date().toLocaleDateString()} | Mode: ${mode === 'AIR' ? 'Air Freight' : 'Sea Freight LCL'}`, 10, y);
+                doc.text(`Ref: ${refNumber} | Date: ${new Date().toLocaleDateString()} | Type: ${mode === 'AIR' ? 'Air Freight (DIM)' : 'Sea Freight (LCL W/M)'}`, 10, y);
                 y += 6;
                 doc.text(`Customer: ${customerName} ${companyName ? `(${companyName})` : ''}`, 10, y);
                 y += 5;
@@ -256,35 +220,28 @@ jobs:
                 doc.setFontSize(8);
                 doc.setTextColor(50);
                 if (mode === 'AIR') {
-                  doc.text(`Total Actual Weight: ${totalActualWeight.toFixed(2)} KG`, 10, y); y += 4;
-                  doc.text(`Volumetric Weight (DIM ${dimFactor}): ${totalVolumetricWeight.toFixed(2)} KG`, 10, y); y += 4;
+                  doc.text(`Total Actual Weight: ${totalAirActual.toFixed(2)} KG`, 10, y); y += 4;
+                  doc.text(`Volumetric Weight (DIM ${dimFactor}): ${totalAirVolumetric.toFixed(2)} KG`, 10, y); y += 4;
                   doc.text(`Chargeable Weight: ${airChargeable.toFixed(2)} KG`, 10, y); y += 6;
                 } else {
                   doc.text(`Total Volume: ${seaCbm.toFixed(2)} CBM`, 10, y); y += 4;
                   doc.text(`Gross Weight: ${seaWeightTons.toFixed(3)} MT (${seaWeightKg} KG)`, 10, y); y += 4;
-                  doc.text(`Chargeable RT (W/M): ${seaChargeableRT.toFixed(2)} RT`, 10, y); y += 6;
+                  doc.text(`Revenue Ton (W/M): ${seaChargeableRT.toFixed(2)} RT`, 10, y); y += 6;
                 }
 
                 doc.setFillColor(15, 23, 42);
                 doc.rect(10, y, 128, 14, 'F');
                 doc.setTextColor(255);
                 doc.setFontSize(12);
-                doc.text(`Total Quote: ${totalCost.toFixed(2)} ${currency}`, 74, y + 9, { align: 'center' });
+                doc.text(`Total Quote: ${finalTotal.toFixed(2)} ${currency}`, 74, y + 9, { align: 'center' });
 
                 y += 24;
                 doc.setFontSize(7);
                 doc.setTextColor(140);
                 doc.text('Thank you for choosing Marafy Logistics Co.', 74, y, { align: 'center' });
 
-                const pdfData = doc.output('arraybuffer');
-                const path = await save({ defaultPath: `${refNumber}.pdf`, filters: [{ name: 'PDF', extensions: ['pdf'] }] });
-                if (path) {
-                  await writeFile(path, new Uint8Array(pdfData));
-                  setMsg('تم حفظ وتصدير ملف الـ PDF بنجاح ✓');
-                } else {
-                  doc.save(`${refNumber}.pdf`);
-                  setMsg('تم تصدير الـ PDF بنجاح ✓');
-                }
+                doc.save(`${refNumber}.pdf`);
+                setMsg(`تم تصدير كشف التسعير ${refNumber}.pdf بنجاح ✓`);
               } catch (e: any) {
                 setMsg('خطأ أثناء تصدير الـ PDF: ' + e.message);
               }
@@ -294,20 +251,23 @@ jobs:
             const cardStyle: any = { background: '#0e182e', padding: '16px', borderRadius: '10px', border: '1px solid #1e293b', marginBottom: '16px' };
 
             return (
-              <div style={{ fontFamily: 'Segoe UI, Tahoma, sans-serif', padding: '20px', background: '#080f1e', minHeight: '100vh', color: '#f8fafc', direction: 'rtl' }}>
-                <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', background: '#0e182e', padding: '12px 20px', borderRadius: '12px', border: '1px solid #1e293b' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+              <div style={{ fontFamily: 'Segoe UI, Tahoma, sans-serif', padding: '24px', background: '#080f1e', minHeight: '100vh', color: '#f8fafc', direction: 'rtl' }}>
+                <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', background: '#0e182e', padding: '14px 20px', borderRadius: '12px', border: '1px solid #1e293b' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
                     {logo ? (
-                      <img src={logo} alt="Logo" style={{ height: '44px', maxWidth: '200px', objectFit: 'contain' }} />
+                      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                        <img src={logo} alt="Logo" style={{ height: '48px', maxWidth: '220px', objectFit: 'contain' }} />
+                        <button onClick={removeLogo} title="حذف" style={{ position: 'absolute', top: '-6px', left: '-8px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: '50%', width: '18px', height: '18px', fontSize: '10px', cursor: 'pointer' }}>✕</button>
+                      </div>
                     ) : (
-                      <label style={{ background: '#1e293b', padding: '6px 12px', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', border: '1px dashed #38bdf8', color: '#38bdf8' }}>
-                        📷 رفع الشعار الدائم
-                        <input type="file" accept="image/*" onChange={handleLogo} style={{ display: 'none' }} />
+                      <label style={{ background: '#1e293b', padding: '8px 12px', borderRadius: '8px', fontSize: '11px', cursor: 'pointer', border: '1px dashed #38bdf8', color: '#38bdf8', fontWeight: 'bold' }}>
+                        📷 رفع الشعار
+                        <input type="file" accept="image/*" onChange={handleLogoUpload} style={{ display: 'none' }} />
                       </label>
                     )}
-                    <div>
-                      <h1 style={{ margin: 0, fontSize: '20px', fontWeight: 'bold', color: '#38bdf8' }}>Marafy.seraj.systim</h1>
-                      <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '11px' }}>لوحة التحكم وإدارة تسعير الشحنات - SQLite & PDF Ready</p>
+                    <div style={{ borderRight: '1px solid #1e293b', paddingRight: '14px' }}>
+                      <h1 style={{ margin: 0, fontSize: '22px', fontWeight: '800', color: '#38bdf8' }}>Marafy.seraj.systim</h1>
+                      <p style={{ margin: '2px 0 0', color: '#94a3b8', fontSize: '11px' }}>نظام تسعير الشحنات الدولي (جوي وبحري W/M) مع التصدير والحفظ</p>
                     </div>
                   </div>
 
@@ -326,7 +286,7 @@ jobs:
                     <div><label style={{ fontSize: '11px', color: '#94a3b8' }}>اسم العميل *</label><input style={inputStyle} placeholder="الاسم" value={customerName} onChange={e => setCustomerName(e.target.value)} /></div>
                     <div><label style={{ fontSize: '11px', color: '#94a3b8' }}>الشركة</label><input style={inputStyle} placeholder="اسم الشركة" value={companyName} onChange={e => setCompanyName(e.target.value)} /></div>
                     <div><label style={{ fontSize: '11px', color: '#94a3b8' }}>الهاتف</label><input style={inputStyle} placeholder="الهاتف" value={phone} onChange={e => setPhone(e.target.value)} /></div>
-                    <div><label style={{ fontSize: '11px', color: '#94a3b8' }}>الوجهة Destination</label><input style={inputStyle} placeholder="ميناء / مطار الوجهة" value={destination} onChange={e => setDestination(e.target.value)} /></div>
+                    <div><label style={{ fontSize: '11px', color: '#94a3b8' }}>الوجهة Destination</label><input style={inputStyle} placeholder="الوجهة" value={destination} onChange={e => setDestination(e.target.value)} /></div>
                     <div>
                       <label style={{ fontSize: '11px', color: '#94a3b8' }}>العملة</label>
                       <select style={inputStyle} value={currency} onChange={e => setCurrency(e.target.value as any)}>
@@ -340,16 +300,16 @@ jobs:
                   <div style={cardStyle}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                       <h3 style={{ margin: 0, fontSize: '14px', color: '#38bdf8' }}>بيانات الطرود الجوية</h3>
-                      <button onClick={() => setPackages([...packages, { id: Date.now(), qty: 1, length: 10, width: 10, height: 10, actualWeight: 1 }])} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>+ إضافة طرد</button>
+                      <button onClick={addAirPackage} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>+ إضافة طرد</button>
                     </div>
-                    {packages.map(p => (
+                    {airPackages.map(p => (
                       <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '60px 1fr 1fr 1fr 1fr 40px', gap: '6px', marginBottom: '8px' }}>
-                        <input style={inputStyle} type="number" value={p.qty} onChange={e => setPackages(packages.map(x => x.id === p.id ? { ...x, qty: Number(e.target.value) } : x))} placeholder="عدد" />
-                        <input style={inputStyle} type="number" value={p.length} onChange={e => setPackages(packages.map(x => x.id === p.id ? { ...x, length: Number(e.target.value) } : x))} placeholder="طول" />
-                        <input style={inputStyle} type="number" value={p.width} onChange={e => setPackages(packages.map(x => x.id === p.id ? { ...x, width: Number(e.target.value) } : x))} placeholder="عرض" />
-                        <input style={inputStyle} type="number" value={p.height} onChange={e => setPackages(packages.map(x => x.id === p.id ? { ...x, height: Number(e.target.value) } : x))} placeholder="ارتفاع" />
-                        <input style={inputStyle} type="number" value={p.actualWeight} onChange={e => setPackages(packages.map(x => x.id === p.id ? { ...x, actualWeight: Number(e.target.value) } : x))} placeholder="وزن" />
-                        <button onClick={() => packages.length > 1 && setPackages(packages.filter(x => x.id !== p.id))} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>✕</button>
+                        <input style={inputStyle} type="number" value={p.qty} onChange={e => updateAirPackage(p.id, 'qty', Number(e.target.value))} placeholder="عدد" />
+                        <input style={inputStyle} type="number" value={p.length} onChange={e => updateAirPackage(p.id, 'length', Number(e.target.value))} placeholder="طول" />
+                        <input style={inputStyle} type="number" value={p.width} onChange={e => updateAirPackage(p.id, 'width', Number(e.target.value))} placeholder="عرض" />
+                        <input style={inputStyle} type="number" value={p.height} onChange={e => updateAirPackage(p.id, 'height', Number(e.target.value))} placeholder="ارتفاع" />
+                        <input style={inputStyle} type="number" value={p.actualWeight} onChange={e => updateAirPackage(p.id, 'actualWeight', Number(e.target.value))} placeholder="وزن" />
+                        <button onClick={() => removeAirPackage(p.id)} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>✕</button>
                       </div>
                     ))}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginTop: '12px' }}>
@@ -372,13 +332,13 @@ jobs:
                 <div style={cardStyle}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                     <h3 style={{ margin: 0, fontSize: '14px', color: '#38bdf8' }}>المصاريف والرسوم الإضافية</h3>
-                    <button onClick={() => setCharges([...charges, { id: Date.now(), name: 'بند إضافي', amount: 0 }])} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>+ إضافة</button>
+                    <button onClick={addCharge} style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>+ إضافة</button>
                   </div>
                   {charges.map(c => (
                     <div key={c.id} style={{ display: 'flex', gap: '8px', marginBottom: '6px' }}>
-                      <input style={{ ...inputStyle, flex: 2 }} value={c.name} onChange={e => setCharges(charges.map(x => x.id === c.id ? { ...x, name: e.target.value } : x))} placeholder="اسم الرسم" />
-                      <input style={{ ...inputStyle, flex: 1 }} type="number" value={c.amount} onChange={e => setCharges(charges.map(x => x.id === c.id ? { ...x, amount: Number(e.target.value) } : x))} placeholder="المبلغ" />
-                      <button onClick={() => setCharges(charges.filter(x => x.id !== c.id))} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', padding: '0 10px', cursor: 'pointer' }}>✕</button>
+                      <input style={{ ...inputStyle, flex: 2 }} value={c.name} onChange={e => updateCharge(c.id, 'name', e.target.value)} placeholder="اسم الرسم" />
+                      <input style={{ ...inputStyle, flex: 1 }} type="number" value={c.amount} onChange={e => updateCharge(c.id, 'amount', Number(e.target.value))} placeholder="المبلغ" />
+                      <button onClick={() => removeCharge(c.id)} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', padding: '0 10px', cursor: 'pointer' }}>✕</button>
                     </div>
                   ))}
                 </div>
@@ -387,17 +347,48 @@ jobs:
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
                     <div>
                       <div style={{ fontSize: '12px', color: '#86efac' }}>المبلغ الإجمالي للتسعير (TOTAL)</div>
-                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#4ade80' }}>{totalCost.toFixed(2)} {currency}</div>
+                      <div style={{ fontSize: '24px', fontWeight: 'bold', color: '#4ade80' }}>{finalTotal.toFixed(2)} {currency}</div>
                       <div style={{ fontSize: '11px', color: '#94a3b8' }}>
-                        {mode === 'AIR' ? `الوزن الخاضع: ${airChargeable.toFixed(2)} KG` : `الطن الاحتسابي: ${seaChargeableRT.toFixed(2)} RT`} | النولون: {currentFreightCost.toFixed(2)} {currency} | الرسوم: {additionalCost.toFixed(2)} {currency}
+                        {mode === 'AIR' ? `الوزن الخاضع: ${airChargeable.toFixed(2)} KG` : `الطن الاحتسابي: ${seaChargeableRT.toFixed(2)} RT`} | النولون: {currentFreightCost.toFixed(2)} {currency} | الرسوم: {totalAdditionalCharges.toFixed(2)} {currency}
                       </div>
                     </div>
                     <div style={{ display: 'flex', gap: '10px' }}>
-                      <button onClick={handleSave} style={{ background: '#0284c7', color: '#fff', padding: '10px 18px', borderRadius: '8px', border: 'none', fontWeight: 'bold', cursor: 'pointer' }}>💾 حفظ في SQLite</button>
+                      <button onClick={handleSaveQuotation} style={{ background: '#0284c7', color: '#fff', padding: '10px 18px', borderRadius: '8px', border: 'none', fontWeight: 'bold', cursor: 'pointer' }}>💾 حفظ في السجل</button>
                       <button onClick={exportPDF} style={{ background: '#16a34a', color: '#fff', padding: '10px 18px', borderRadius: '8px', border: 'none', fontWeight: 'bold', cursor: 'pointer' }}>📄 تصدير كشف PDF</button>
                     </div>
                   </div>
                 </div>
+
+                {/* سجل العمليات المحفوظة */}
+                {savedHistory.length > 0 && (
+                  <div style={cardStyle}>
+                    <h3 style={{ margin: '0 0 10px', fontSize: '14px', color: '#38bdf8' }}>سجل العمليات المحفوظة محلياً</h3>
+                    <div style={{ overflowX: 'auto' }}>
+                      <table style={{ width: '100%', fontSize: '12px', textAlign: 'center', borderCollapse: 'collapse' }}>
+                        <thead>
+                          <tr style={{ background: '#1e293b', color: '#cbd5e1' }}>
+                            <th style={{ padding: '6px' }}>المرجع</th>
+                            <th style={{ padding: '6px' }}>التاريخ</th>
+                            <th style={{ padding: '6px' }}>العميل</th>
+                            <th style={{ padding: '6px' }}>النوع</th>
+                            <th style={{ padding: '6px' }}>الإجمالي</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {savedHistory.map((item, idx) => (
+                            <tr key={idx} style={{ borderBottom: '1px solid #1e293b' }}>
+                              <td style={{ padding: '6px', fontWeight: 'bold', color: '#38bdf8' }}>{item.refNumber}</td>
+                              <td style={{ padding: '6px' }}>{item.date}</td>
+                              <td style={{ padding: '6px' }}>{item.customerName}</td>
+                              <td style={{ padding: '6px' }}>{item.mode === 'AIR' ? 'جوي' : 'بحري W/M'}</td>
+                              <td style={{ padding: '6px', color: '#4ade80', fontWeight: 'bold' }}>{item.totalCost.toFixed(2)} {item.currency}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
             );
           }
